@@ -1,0 +1,197 @@
+#!/usr/bin/env python3
+"""
+AC Transit Bus Tracker – with FS scheduled fallback for Solano & Colusa,
+weather, and local quote of the day.
+Optimized for e-ink display.
+"""
+
+import argparse
+import requests
+
+import time
+import os
+from tabulate import tabulate
+from datetime import datetime, timedelta
+
+os.environ['TERM'] = 'xterm-256color'
+
+# API & Weather config
+API_KEY = "B894C7BCE1ADC0A893A087ADBC612340"
+NWS_POINT_URL = "https://api.weather.gov/points/37.87,-122.27"
+NWS_HEADERS = {"User-Agent": "jdvale96@gmail.com"}
+
+# Hardcoded FS weekday morning departure times
+FS_SCHEDULED_DEPARTURES = ["06:10", "07:52"]
+
+# Favorite stops
+FAVORITE_STOPS = {
+    "alameda_solano": {"id": "57735", "name": "The Alameda & Solano Av"},
+    "arlington_yosemite": {"id": "52880", "name": "Arlington Av & Yosemite Rd"},
+    "solano_alameda": {"id": "51251", "name": "Solano Av & The Alameda"},
+    "solano_colusa": {
+        "id": "57799",
+        "name": "Solano Av & Colusa Av (San Francisco)",
+        "route_filter": "FS"
+    }
+}
+
+# Quote cache (in-memory storage, resets at local midnight instead of UTC+0)
+_last_quote_date = None
+_last_quote = None
+
+def get_quote_once_per_day():
+    global _last_quote_date, _last_quote
+    today = datetime.now().date()
+
+    if _last_quote_date != today:
+        try:
+            response = requests.get("https://zenquotes.io/api/today", timeout=5)
+            response.raise_for_status()
+            data = response.json()[0]
+            _last_quote = f"“{data.get('q')}” — {data.get('a')}"
+        except Exception as e:
+            _last_quote = f"Quote unavailable: {e}"
+        _last_quote_date = today
+
+    return _last_quote
+
+def get_next_scheduled_fs_departures(count=2):
+    now = datetime.now()
+    upcoming = []
+
+    for day_offset in range(0, 7):
+        candidate_day = now + timedelta(days=day_offset)
+
+        if candidate_day.weekday() >= 5:
+            continue  # skip weekends
+
+        for time_str in FS_SCHEDULED_DEPARTURES:
+            dep_time = datetime.strptime(time_str, "%H:%M").time()
+            dep_datetime = datetime.combine(candidate_day.date(), dep_time)
+
+            if dep_datetime >= now - timedelta(minutes=5):
+                upcoming.append(dep_datetime.strftime("%A %I:%M %p"))
+                if len(upcoming) == count:
+                    return upcoming
+
+    return upcoming
+
+def get_predictions(api_key, stop_id):
+    url = f"https://api.actransit.org/transit/stops/{stop_id}/predictions/"
+    params = {"token": api_key}
+    try:
+        response = requests.get(url, params=params, timeout=10)
+        response.raise_for_status()
+        return response.json() or []
+    except requests.exceptions.RequestException:
+        return []
+
+def format_predictions(predictions, stop_name, stop_id, route_filter=None):
+    route_groups = {}
+    for pred in predictions:
+        route_id = pred.get("RouteName", "Unknown")
+        if route_filter and route_id != route_filter:
+            continue
+        route_groups.setdefault(route_id, []).append(pred)
+
+    if not route_groups:
+        if stop_id == "57799" and route_filter == "FS":
+            next_fs_list = get_next_scheduled_fs_departures()
+            if next_fs_list:
+                message = (
+                    f"\n{stop_name} (Stop ID: {stop_id})\n"
+                    f"No real-time predictions available.\n\n"
+                    f"Next scheduled FS line departures:\n"
+                )
+                for dep in next_fs_list:
+                    message += f" - {dep}\n"
+                return message
+            else:
+                return (
+                    f"\n{stop_name} (Stop ID: {stop_id})\n"
+                    f"No FS predictions or scheduled trips remaining today.\n"
+                )
+        else:
+            return f"\n{stop_name} (Stop ID: {stop_id})\nNo upcoming trips.\n"
+
+    now = datetime.now()
+    output = f"\n{stop_name} (Stop ID: {stop_id})\n"
+
+    for route_id, route_preds in route_groups.items():
+        output += f"\nRoute {route_id}\n"
+        table_data = []
+        headers = ["Trip", "Arriving In"]
+
+        for pred in route_preds:
+            try:
+                pred_time_str = pred.get("PredictedDeparture", "").replace("Z", "")
+                pred_time = datetime.fromisoformat(pred_time_str)
+                minutes_until = round((pred_time - now).total_seconds() / 60)
+                arrival_text = "Now" if minutes_until <= 0 else f"{minutes_until} mins"
+                trip_id = pred.get("TripId", "")
+                table_data.append([trip_id, arrival_text])
+            except Exception:
+                continue
+
+        if table_data:
+            table_data.sort(key=lambda x: int(x[1].split()[0]) if x[1] != "Now" else 0)
+            output += tabulate(table_data, headers=headers, tablefmt="simple") + "\n"
+        else:
+            output += "No arrival times available.\n"
+
+    return output
+
+def get_berkeley_hourly_forecast():
+    try:
+        resp = requests.get(NWS_POINT_URL, headers=NWS_HEADERS, timeout=10)
+        resp.raise_for_status()
+        forecast_url = resp.json()['properties']['forecastHourly']
+        forecast_resp = requests.get(forecast_url, headers=NWS_HEADERS, timeout=10)
+        forecast_resp.raise_for_status()
+        periods = forecast_resp.json()['properties']['periods'][:10]
+
+        output = "\nWeather Forecast for Berkeley, CA:\n"
+        for period in periods:
+            time_str = datetime.fromisoformat(period['startTime'].replace("Z", "")).strftime("%I:%M %p")
+            output += f"{time_str}: {period['temperature']}\u00b0F, {period['shortForecast']}\n"
+        return output
+    except Exception as e:
+        return f"Weather unavailable: {e}"
+
+def display_predictions(api_key):
+    os.system('cls' if os.name == 'nt' else 'clear')
+    print("AC TRANSIT BUS TRACKER")
+    print("=" * 40)
+    print(f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+
+    for stop_key, stop_info in FAVORITE_STOPS.items():
+        stop_id = stop_info["id"]
+        stop_name = stop_info["name"]
+        route_filter = stop_info.get("route_filter")
+        predictions = get_predictions(api_key, stop_id)
+        print(format_predictions(predictions, stop_name, stop_id, route_filter))
+
+    print(get_berkeley_hourly_forecast())
+    print(f"\nQuote of the day:\n{get_quote_once_per_day()}")
+
+def main():
+    parser = argparse.ArgumentParser(description="AC Transit Bus Tracker")
+    parser.add_argument("--api_key", default=API_KEY)
+    parser.add_argument("--refresh", type=int, default=60)
+    parser.add_argument("--once", action="store_true")
+    args = parser.parse_args()
+
+    if args.once:
+        display_predictions(args.api_key)
+    else:
+        try:
+            while True:
+                display_predictions(args.api_key)
+                print(f"\nRefreshing in {args.refresh} seconds...")
+                time.sleep(args.refresh)
+        except KeyboardInterrupt:
+            print("\nExiting AC Transit Bus Tracker")
+
+if __name__ == "__main__":
+    main()
+
