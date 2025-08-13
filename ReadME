@@ -1,0 +1,280 @@
+# AC Transit Bus Tracker for E-ink Display
+
+A Python application that displays real-time bus predictions, weather information, daily quotes, and customizable alerts on a Waveshare 7.5" e-ink display. Perfect for creating an informative dashboard near your front door!
+
+![Bus Tracker Display](https://via.placeholder.com/800x480/FFFFFF/000000?text=Bus+Tracker+Display)
+
+## Features
+
+- **Real-time Bus Predictions**: Shows arrival times for your favorite AC Transit stops
+- **Weather Forecast**: Hourly weather data from the National Weather Service
+- **Daily Quotes**: Inspirational quotes from ZenQuotes API
+- **Custom Alerts**: Configurable reminders (street sweeping, trash day, etc.)
+- **Background Images**: Display custom images as faded backgrounds
+- **Low Power**: Designed for e-ink displays with minimal power consumption
+
+## Hardware Requirements
+
+- Raspberry Pi (tested on Pi 4)
+- [Waveshare 7.5" e-ink display (800x480)](https://www.waveshare.com/7.5inch-e-paper-hat.htm)
+- MicroSD card (16GB+ recommended)
+
+## Software Requirements
+
+- Python 3.7+
+- Raspberry Pi OS
+- Waveshare e-Paper library
+
+## Installation
+
+### 1. Set up Raspberry Pi and E-ink Display
+
+Follow Waveshare's official setup guide for your e-ink display:
+- [Waveshare Wiki](https://www.waveshare.com/wiki/7.5inch_e-Paper_HAT)
+
+### 2. Install Waveshare E-Paper Library
+
+```bash
+# Clone the official Waveshare library
+git clone https://github.com/waveshare/e-Paper
+cd e-Paper/RaspberryPi_JetsonNano/python
+sudo python3 setup.py install
+```
+
+### 3. Install Python Dependencies
+
+```bash
+pip3 install requests pillow numpy
+```
+
+### 4. Clone This Repository
+
+```bash
+git clone https://github.com/yourusername/bus-tracker-eink
+cd bus-tracker-eink
+```
+
+## Configuration
+
+### 1. Update File Paths
+
+Edit `bus.py` and update these paths for your system:
+
+```python
+# Update this path to match your Waveshare library installation
+sys.path.append('/home/pi/e-Paper/RaspberryPi_JetsonNano/python/lib')
+
+# Update with your preferred background image
+DEFAULT_IMAGE_PATH = "/home/pi/Pictures/your-image.png"
+```
+
+### 2. Get AC Transit API Key
+
+1. Visit [AC Transit Developer Portal](https://api.actransit.org/)
+2. Sign up for a free API key
+3. Update the API key in `bus.py`:
+
+```python
+API_KEY = "your_actual_api_key_here"
+```
+
+### 3. Configure Your Location
+
+Update the weather coordinates and email:
+
+```python
+# Get your coordinates from https://www.latlong.net/
+NWS_POINT_URL = "https://api.weather.gov/points/37.87,-122.27"  # SF Bay Area example
+NWS_HEADERS = {"User-Agent": "your_email@example.com"}
+```
+
+### 4. Find Your Bus Stops
+
+Find your bus stop IDs using AC Transit's website or API:
+
+1. Visit [AC Transit Trip Planner](https://actransit.org/)
+2. Search for your stops
+3. Note the stop IDs from the URLs or use the API
+
+Update `FAVORITE_STOPS` in `bus.py`:
+
+```python
+FAVORITE_STOPS = {
+    "home_stop": {"id": "12345", "name": "Main St & 1st Ave"},
+    "work_stop": {"id": "67890", "name": "Downtown Transit Center"},
+    "school_stop": {"id": "54321", "name": "University Ave & Shattuck"},
+    "filtered_stop": {
+        "id": "98765",
+        "name": "Special Route Stop",
+        "route_filter": "51A"  # Only show this specific route
+    }
+}
+```
+
+### 5. Customize Scheduled Departures (Optional)
+
+For routes without real-time data, you can set static schedules:
+
+```python
+SCHEDULED_DEPARTURES = ["06:10", "07:52", "08:30", "17:15", "18:45"]
+```
+
+### 6. Configure Alerts (Optional)
+
+Customize the alert functions for your needs:
+
+```python
+def is_4th_friday_tomorrow(today=None):
+    # Modify this for your city's street sweeping schedule
+    # Current: 4th Friday of each month
+    
+def monday_trash(today=None):
+    # Modify this for your trash collection day
+    # Current: Monday mornings
+```
+
+## Usage
+
+### Basic Usage
+
+Run the script to update your display:
+
+```bash
+python3 bus.py
+```
+
+### With Custom Background Image
+
+```bash
+python3 bus.py /path/to/your/image.png
+```
+
+### Display Image Only
+
+To display just an image without transit data:
+
+```bash
+python3 bus.py --image-only /path/to/your/image.png
+```
+
+### Automated Updates
+
+Set up a cron job to update the display automatically:
+
+```bash
+# Edit your crontab
+crontab -e
+
+# Add this line to update every 5 minutes
+*/5 * * * * cd /home/pi/bus-tracker-eink && python3 bus.py >> /home/pi/bus-tracker.log 2>&1
+```
+
+## Display Layout
+
+The 800x480 display is organized as follows:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  [Background Image]                        [Alerts]         │
+│                                                             │
+│  Bus Stop 1                                                 │
+│    Route 51A: 3m, 15m                                       │
+│    Route 6: 8m, 22m                                         │
+│                                                             │
+│  Bus Stop 2                                                 │
+│    Route 18: 1m, 12m                                        │
+│                                                             │
+│  Bus Stop 3                                                 │
+│    Route FS: Mon 6:10 AM                                    │
+│                                                             │
+│  Quote of the Day:                          Weather:        │
+│  "Your inspiring quote                       Now    72°F    │
+│   goes here."                                1PM    75°F    │ 
+│   - Author                                   2PM    77°F    │
+│                                          Updated: timestamp │
+└─────────────────────────────────────────────────────────────┘
+```
+
+## Troubleshooting
+
+### Common Issues
+
+1. **"No module named 'waveshare_epd'"**
+   - Ensure the Waveshare library is properly installed
+   - Check that the library path in the script is correct
+
+2. **"Permission denied" on GPIO**
+   - Run with `sudo` or add your user to the `gpio` group
+   - `sudo usermod -a -G gpio $USER`
+
+3. **API requests failing**
+   - Check your internet connection
+   - Verify your AC Transit API key is valid
+   - Ensure your email is set in the NWS headers
+
+4. **Display not updating**
+   - Check physical connections to the e-ink display
+   - Verify the display is compatible (tested with 7.5" V2)
+   - Try the basic Waveshare examples first
+
+### Debug Mode
+
+Add debug prints to troubleshoot:
+
+```python
+import logging
+logging.basicConfig(level=logging.DEBUG)
+```
+
+## Customization
+
+### Adding New Data Sources
+
+The modular design makes it easy to add new information:
+
+1. Create a new function to fetch your data
+2. Add display logic in `create_display_image()`
+3. Position the text/graphics as needed
+
+### Styling
+
+Modify fonts, colors, and layout in the `create_display_image()` function:
+
+```python
+# Font sizes
+title_font = ImageFont.truetype("font.ttf", 30)
+header_font = ImageFont.truetype("font.ttf", 22)
+
+# Colors (0 = black, 255 = white for e-ink)
+draw.text((x, y), text, font=font, fill=0)
+```
+
+## API Limits & Considerations
+
+- **AC Transit API**: Free tier has rate limits
+- **National Weather Service**: Free, no key required
+- **ZenQuotes**: Free tier, cached daily
+- **E-ink Display**: ~15-30 second refresh time
+
+## Contributing
+
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes
+4. Test thoroughly
+5. Submit a pull request
+
+## License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+## Acknowledgments
+
+- [Waveshare](https://www.waveshare.com/) for the excellent e-ink displays
+- [AC Transit](https://www.actransit.org/) for providing the API
+- [National Weather Service](https://www.weather.gov/) for free weather data
+- [ZenQuotes](https://zenquotes.io/) for daily inspiration
+
+---
+
+**Note**: This project is not affiliated with AC Transit or Waveshare. Use responsibly and respect API rate limits.
