@@ -1,45 +1,74 @@
 #!/usr/bin/env python3
 """
-AC Transit Bus Tracker – with FS scheduled fallback for Solano & Colusa,
-weather, and local quote of the day.
-Optimized for e-ink display.
+AC Transit Bus Tracker for E-ink Display
+Optimized for Waveshare 7.5" e-ink display (800x480 resolution)
+Now includes full-screen background image with overlay text
 """
 
-import argparse
-import requests
-
-import time
+import sys
 import os
-from tabulate import tabulate
-from datetime import datetime, timedelta
+import time
+import requests
+from datetime import datetime, timedelta, date
+from PIL import Image, ImageDraw, ImageFont
+import numpy as np
 
-os.environ['TERM'] = 'xterm-256color'
+# Add the e-ink library path - UPDATE THIS PATH FOR YOUR SETUP
+sys.path.append('/path/to/your/e-Paper/RaspberryPi_JetsonNano/python/lib')
+from waveshare_epd import epd7in5_V2
 
-# API & Weather config
-API_KEY = "B894C7BCE1ADC0A893A087ADBC612340"
-NWS_POINT_URL = "https://api.weather.gov/points/37.87,-122.27"
-NWS_HEADERS = {"User-Agent": "jdvale96@gmail.com"}
+# Configuration - UPDATE THESE VALUES
+API_KEY = "YOUR_AC_TRANSIT_API_KEY_HERE"  # Get from AC Transit
+NWS_POINT_URL = "https://api.weather.gov/points/YOUR_LAT,YOUR_LON"  # Update with your coordinates
+NWS_HEADERS = {"User-Agent": "your_email@example.com"}  # Update with your email
+# Image config
+DEFAULT_IMAGE_PATH = "/path/to/your/default/image.png"  # Update with your image path
+IMAGE_DISPLAY_SIZE = (200, 150)  # Width, Height for the image in the layout
 
-# Hardcoded FS weekday morning departure times
-FS_SCHEDULED_DEPARTURES = ["06:10", "07:52"]
+# Hardcoded scheduled departure times (customize for your route)
+SCHEDULED_DEPARTURES = ["06:10", "07:52"]
 
-# Favorite stops
+# Favorite stops - UPDATE WITH YOUR STOPS
+# To find stop IDs, use AC Transit's API or their website
 FAVORITE_STOPS = {
-    "alameda_solano": {"id": "57735", "name": "The Alameda & Solano Av"},
-    "arlington_yosemite": {"id": "52880", "name": "Arlington Av & Yosemite Rd"},
-    "solano_alameda": {"id": "51251", "name": "Solano Av & The Alameda"},
-    "solano_colusa": {
-        "id": "57799",
-        "name": "Solano Av & Colusa Av (San Francisco)",
-        "route_filter": "FS"
+    "stop1": {"id": "12345", "name": "Your Stop 1"},
+    "stop2": {"id": "67890", "name": "Your Stop 2"},
+    "stop3": {"id": "54321", "name": "Your Stop 3"},
+    "stop4": {
+        "id": "98765",
+        "name": "Your Stop 4",
+        "route_filter": "YourRoute"  # Optional: filter to specific route
     }
 }
 
-# Quote cache (in-memory storage, resets at local midnight instead of UTC+0)
+# Quote cache
 _last_quote_date = None
 _last_quote = None
 
+def is_4th_friday_tomorrow(today=None):
+    """Return True if tomorrow is the 4th Friday of the month"""
+    if today is None:
+        today = date.today()
+    tomorrow = today + timedelta(days=1)
+    if tomorrow.weekday() != 4:  # 4 = Friday
+        return False
+    # Count how many Fridays have occurred up to 'tomorrow' this month
+    fridays_passed = 0
+    for day in range(1, tomorrow.day + 1):
+        d = date(tomorrow.year, tomorrow.month, day)
+        if d.weekday() == 4:
+            fridays_passed += 1
+    return fridays_passed == 4
+
+def monday_trash(today=None):
+    """Return True if today is Monday (customize for your trash day)"""
+    if today is None:
+        today = date.today()
+    if today.weekday() == 0:  # 0 = Monday
+        return True
+
 def get_quote_once_per_day():
+    """Fetch daily quote from ZenQuotes API"""
     global _last_quote_date, _last_quote
     today = datetime.now().date()
 
@@ -48,35 +77,41 @@ def get_quote_once_per_day():
             response = requests.get("https://zenquotes.io/api/today", timeout=5)
             response.raise_for_status()
             data = response.json()[0]
-            _last_quote = f"“{data.get('q')}” — {data.get('a')}"
+            quote_text = data.get('q', 'No quote available')
+            author = data.get('a', 'Unknown')
+            # Keep quotes short for display
+            if len(quote_text) > 200:
+                quote_text = quote_text[:77] + "..."
+            _last_quote = f'"{quote_text}"\n- {author}'
         except Exception as e:
-            _last_quote = f"Quote unavailable: {e}"
+            _last_quote = f"Quote unavailable"
         _last_quote_date = today
 
     return _last_quote
 
-def get_next_scheduled_fs_departures(count=2):
+def get_next_scheduled_departures(count=2):
+    """Get next scheduled departures for routes without real-time data"""
     now = datetime.now()
     upcoming = []
 
     for day_offset in range(0, 7):
         candidate_day = now + timedelta(days=day_offset)
-
         if candidate_day.weekday() >= 5:
             continue  # skip weekends
 
-        for time_str in FS_SCHEDULED_DEPARTURES:
+        for time_str in SCHEDULED_DEPARTURES:
             dep_time = datetime.strptime(time_str, "%H:%M").time()
             dep_datetime = datetime.combine(candidate_day.date(), dep_time)
 
             if dep_datetime >= now - timedelta(minutes=5):
-                upcoming.append(dep_datetime.strftime("%A %I:%M %p"))
+                upcoming.append(dep_datetime.strftime("%a %I:%M %p"))
                 if len(upcoming) == count:
                     return upcoming
 
     return upcoming
 
 def get_predictions(api_key, stop_id):
+    """Fetch real-time predictions from AC Transit API"""
     url = f"https://api.actransit.org/transit/stops/{stop_id}/predictions/"
     params = {"token": api_key}
     try:
@@ -86,7 +121,8 @@ def get_predictions(api_key, stop_id):
     except requests.exceptions.RequestException:
         return []
 
-def format_predictions(predictions, stop_name, stop_id, route_filter=None):
+def format_predictions_for_display(predictions, stop_name, stop_id, route_filter=None):
+    """Format prediction data for display"""
     route_groups = {}
     for pred in predictions:
         route_id = pred.get("RouteName", "Unknown")
@@ -95,103 +131,372 @@ def format_predictions(predictions, stop_name, stop_id, route_filter=None):
         route_groups.setdefault(route_id, []).append(pred)
 
     if not route_groups:
-        if stop_id == "57799" and route_filter == "FS":
-            next_fs_list = get_next_scheduled_fs_departures()
-            if next_fs_list:
-                message = (
-                    f"\n{stop_name} (Stop ID: {stop_id})\n"
-                    f"No real-time predictions available.\n\n"
-                    f"Next scheduled FS line departures:\n"
-                )
-                for dep in next_fs_list:
-                    message += f" - {dep}\n"
-                return message
+        # Fallback to scheduled times if no real-time data
+        if route_filter:
+            next_departures = get_next_scheduled_departures()
+            if next_departures:
+                return f"{stop_name}\n{route_filter}: {', '.join(next_departures)}"
             else:
-                return (
-                    f"\n{stop_name} (Stop ID: {stop_id})\n"
-                    f"No FS predictions or scheduled trips remaining today.\n"
-                )
+                return f"{stop_name}\nNo trips today"
         else:
-            return f"\n{stop_name} (Stop ID: {stop_id})\nNo upcoming trips.\n"
+            return f"{stop_name}\nNo upcoming trips"
 
     now = datetime.now()
-    output = f"\n{stop_name} (Stop ID: {stop_id})\n"
+    result_lines = [stop_name]
 
     for route_id, route_preds in route_groups.items():
-        output += f"\nRoute {route_id}\n"
-        table_data = []
-        headers = ["Trip", "Arriving In"]
-
-        for pred in route_preds:
+        arrivals = []
+        for pred in route_preds[:3]:  # Limit to 3 predictions per route
             try:
                 pred_time_str = pred.get("PredictedDeparture", "").replace("Z", "")
                 pred_time = datetime.fromisoformat(pred_time_str)
                 minutes_until = round((pred_time - now).total_seconds() / 60)
-                arrival_text = "Now" if minutes_until <= 0 else f"{minutes_until} mins"
-                trip_id = pred.get("TripId", "")
-                table_data.append([trip_id, arrival_text])
+                arrival_text = "Now" if minutes_until <= 0 else f"{minutes_until}m"
+                arrivals.append(arrival_text)
             except Exception:
                 continue
 
-        if table_data:
-            table_data.sort(key=lambda x: int(x[1].split()[0]) if x[1] != "Now" else 0)
-            output += tabulate(table_data, headers=headers, tablefmt="simple") + "\n"
-        else:
-            output += "No arrival times available.\n"
+        if arrivals:
+            arrivals.sort(key=lambda x: int(x[:-1]) if x != "Now" else 0)
+            result_lines.append(f"Route {route_id}: {', '.join(arrivals)}")
 
-    return output
+    return '\n'.join(result_lines)
 
-def get_berkeley_hourly_forecast():
+def get_weather_summary():
+    """Fetch hourly weather forecast from National Weather Service"""
     try:
+        from datetime import timezone
+        
         resp = requests.get(NWS_POINT_URL, headers=NWS_HEADERS, timeout=10)
         resp.raise_for_status()
         forecast_url = resp.json()['properties']['forecastHourly']
         forecast_resp = requests.get(forecast_url, headers=NWS_HEADERS, timeout=10)
         forecast_resp.raise_for_status()
-        periods = forecast_resp.json()['properties']['periods'][:10]
+        all_periods = forecast_resp.json()['properties']['periods']
+        
+        # Get current time in UTC for proper comparison with API timestamps
+        now_utc = datetime.now(timezone.utc)
+        current_periods = []
+        
+        # Filter to get periods starting from current hour or later
+        for period in all_periods:
+            try:
+                # Parse the period start time (API returns UTC timestamps)
+                period_start_str = period['startTime']
+                if period_start_str.endswith('Z'):
+                    # Replace Z with +00:00 for proper ISO format
+                    period_start_str = period_start_str.replace('Z', '+00:00')
+                period_start = datetime.fromisoformat(period_start_str)
+                
+                # Only include periods that start at or after the current hour
+                # Allow some flexibility (within 30 minutes of current time)
+                if period_start >= now_utc - timedelta(minutes=30):
+                    current_periods.append(period)
+                    
+                # Stop once we have enough current/future periods
+                if len(current_periods) >= 10:
+                    break
+                    
+            except Exception as e:
+                print(f"Error parsing period time: {e}")
+                continue
+        
+        # If we don't have enough current periods, fall back to the first few
+        if len(current_periods) < 3:
+            current_periods = all_periods[:6]
+        
+        weather_lines = []
+        for i, period in enumerate(current_periods[:10]):
+            try:
+                period_start_str = period['startTime']
+                if period_start_str.endswith('Z'):
+                    period_start_str = period_start_str.replace('Z', '+00:00')
+                period_start = datetime.fromisoformat(period_start_str)
+                
+                if i == 0:
+                    # For the first period, check if it's within current hour
+                    if abs((period_start - now_utc).total_seconds()) < 1800:  # Within 30 minutes
+                        time_str = "Now"
+                    else:
+                        # Convert to local time for display
+                        local_time = period_start.astimezone()
+                        time_str = local_time.strftime("%I%p").lstrip('0')
+                else:
+                    # Convert to local time for display
+                    local_time = period_start.astimezone()
+                    time_str = local_time.strftime("%I%p").lstrip('0')
+                    
+                temp = period['temperature']
+                forecast = period['shortForecast']
+                # Shorten common weather phrases
+                forecast = forecast.replace("Partly Cloudy", "P.Cloudy").replace("Mostly Cloudy", "M.Cloudy")
+                
+                # Determine number of spaces based on time string length
+                if time_str in ["10AM", "11AM", "12AM", "10PM", "11PM", "12PM"]:
+                    spaces = " " * 2  # 2 spaces for 4-character times
+                else:
+                    spaces = " " * 3  # 3 spaces for 3-character times (like "9AM", "1PM", "Now")
 
-        output = "\nWeather Forecast for Berkeley, CA:\n"
-        for period in periods:
-            time_str = datetime.fromisoformat(period['startTime'].replace("Z", "")).strftime("%I:%M %p")
-            output += f"{time_str}: {period['temperature']}\u00b0F, {period['shortForecast']}\n"
-        return output
+                weather_lines.append(f"{time_str}{spaces}{temp:>3}°F  {forecast}")
+                
+            except Exception as e:
+                print(f"Error processing weather period: {e}")
+                continue
+        
+        return '\n'.join(weather_lines) if weather_lines else "Weather data unavailable"
+        
     except Exception as e:
-        return f"Weather unavailable: {e}"
+        print(f"Weather API error: {e}")
+        return "Weather unavailable"
 
-def display_predictions(api_key):
-    os.system('cls' if os.name == 'nt' else 'clear')
-    print("AC TRANSIT BUS TRACKER")
-    print("=" * 40)
-    print(f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+def load_and_prepare_image(image_path, target_size, as_background=False):
+    """Load an image and prepare it for e-ink display"""
+    try:
+        if not os.path.exists(image_path):
+            print(f"Warning: Image not found at {image_path}")
+            return None
+            
+        # Load the image
+        img = Image.open(image_path)
+        
+        # Convert to grayscale if needed
+        if img.mode != 'L':
+            img = img.convert('L')
+        
+        if as_background:
+            # For background images, resize to fill the entire screen
+            img = img.resize(target_size, Image.Resampling.LANCZOS)
+            # Lighten the image for better text readability (make it more faded)
+            # Convert to array for processing
+            import numpy as np
+            img_array = np.array(img)
+            # Lighten by blending with white (increase brightness, reduce contrast)
+            lightened = img_array * 0.3 + 255 * 0.7  # 30% original, 70% white
+            img = Image.fromarray(lightened.astype(np.uint8), mode='L')
+        else:
+            # Resize to fit the target size while maintaining aspect ratio
+            img.thumbnail(target_size, Image.Resampling.LANCZOS)
+            
+            # Create a new image with the exact target size and paste the resized image
+            final_img = Image.new('L', target_size, 255)  # White background
+            
+            # Center the image
+            x_offset = (target_size[0] - img.width) // 2
+            y_offset = (target_size[1] - img.height) // 2
+            final_img.paste(img, (x_offset, y_offset))
+            img = final_img
+        
+        # Convert to 1-bit for e-ink display
+        final_img = img.convert('1')
+        
+        return final_img
+        
+    except Exception as e:
+        print(f"Error loading image: {e}")
+        return None
 
+def create_display_image(image_path=None):
+    """Create the main display image with all information"""
+    # Create image for 7.5" display (800x480)
+    image = Image.new('1', (800, 480), 255)  # White background
+    draw = ImageDraw.Draw(image)
+    
+    # Load and display the background image first
+    display_image_path = image_path or DEFAULT_IMAGE_PATH
+    background_image = load_and_prepare_image(display_image_path, (800, 480), as_background=True)
+    if background_image:
+        print(f"Using {display_image_path} as full-screen background")
+        image.paste(background_image, (0, 0))
+    else:
+        print("No background image loaded, using white background")
+    
+    # Try to use a system font
+    try:
+        title_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 30)
+        header_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 22)
+        body_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 20)  # Made bold for better visibility
+        body_font_reg = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 20)
+        small_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 16)  # Made bold for better visibility
+        alert_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 24)  # For alerts
+        v_small_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 12)  # For timestamps
+    except:
+        # Fallback to default font
+        title_font = ImageFont.load_default()
+        header_font = ImageFont.load_default()
+        body_font = ImageFont.load_default()
+        small_font = ImageFont.load_default()
+        alert_font = ImageFont.load_default()
+        v_small_font = ImageFont.load_default()
+
+    y_pos = 75
+    y_pos_timestamp = 450
+    
+    # Timestamp
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    timestamp_text = f"Updated: {timestamp}"
+    draw.text((575, y_pos_timestamp), timestamp_text, font=v_small_font, fill=0)
+    
+    # Street Sweeping Reminder (customize for your city's schedule)
+    if is_4th_friday_tomorrow():
+        print("Adding street sweeping reminder...")
+        sweeping_text = "Street Sweeping Tomorrow!"
+        text_bbox = draw.textbbox((0, 0), sweeping_text, font=alert_font)
+        text_width = text_bbox[2] - text_bbox[0]
+        alert_x = 800 - text_width - 15
+        alert_y = y_pos
+        rect_padding = 8
+        rect_x1 = alert_x - rect_padding
+        rect_y1 = alert_y - rect_padding
+        rect_x2 = alert_x + text_width + rect_padding
+        rect_y2 = alert_y + 25 + rect_padding
+        draw.rectangle([rect_x1, rect_y1, rect_x2, rect_y2], fill=255, outline=0, width=2)
+        draw.text((alert_x, alert_y), sweeping_text, font=alert_font, fill=0)
+
+    # Trash Day Reminder (customize for your trash day)
+    if monday_trash():
+        print("Adding trash reminder...")
+        trash_text = "Take Out The Trash Tonight!"
+        text_bbox = draw.textbbox((0, 0), trash_text, font=alert_font)
+        text_width = text_bbox[2] - text_bbox[0]
+        alert_x = 800 - text_width - 15
+        alert_y = y_pos
+        rect_padding = 8
+        rect_x1 = alert_x - rect_padding
+        rect_y1 = alert_y - rect_padding
+        rect_x2 = alert_x + text_width + rect_padding
+        rect_y2 = alert_y + 25 + rect_padding
+        draw.rectangle([rect_x1, rect_y1, rect_x2, rect_y2], fill=255, outline=0, width=2)
+        draw.text((alert_x, alert_y), trash_text, font=alert_font, fill=0)
+        y_pos += 50
+
+    # BUS PREDICTIONS LEFT COLUMN
+    left_col_x = 15
+    col_y = 90
+
+    # Process each favorite stop
     for stop_key, stop_info in FAVORITE_STOPS.items():
         stop_id = stop_info["id"]
         stop_name = stop_info["name"]
         route_filter = stop_info.get("route_filter")
-        predictions = get_predictions(api_key, stop_id)
-        print(format_predictions(predictions, stop_name, stop_id, route_filter))
 
-    print(get_berkeley_hourly_forecast())
-    print(f"\nQuote of the day:\n{get_quote_once_per_day()}")
+        print(f"Getting predictions for {stop_name}...")
+        predictions = get_predictions(API_KEY, stop_id)
+        formatted_pred = format_predictions_for_display(predictions, stop_name, stop_id, route_filter)
+
+        lines = formatted_pred.split('\n')
+
+        draw.text((left_col_x, col_y), lines[0], font=header_font, fill=0)
+        col_y += 22
+
+        for line in lines[1:]:
+            draw.text((left_col_x + 10, col_y), line, font=body_font_reg, fill=0)
+            col_y += 18
+
+        col_y += 15
+
+    # QUOTE AT BOTTOM LEFT
+    print("Getting quote...")
+    quote = get_quote_once_per_day()
+    
+    quote_words = quote.split()
+    quote_lines = ["Quote of the Day:"]
+    current_line = ""
+    for word in quote_words:
+        test_line = (current_line + " " + word).strip()
+        if len(test_line) <= 35:  # Slightly longer lines for bottom positioning
+            current_line = test_line
+        else:
+            quote_lines.append(current_line)
+            current_line = word
+    if current_line:
+        quote_lines.append(current_line)
+    quote_lines = quote_lines[:6]  # Limit to 6 lines max
+    
+    # Position quote at bottom left, starting from y=375
+    quote_y = 375
+    for j, line in enumerate(quote_lines):
+        font_to_use = header_font if j == 0 else small_font
+        draw.text((left_col_x, quote_y), line, font=font_to_use, fill=0)
+        quote_y += 25 if j == 0 else 15
+
+    # WEATHER ON RIGHT SIDE 
+    right_col_x = 475
+    weather_y = 200
+
+    print("Getting weather...")
+    weather_info = get_weather_summary()
+    weather_lines = ["Local Weather:"] + weather_info.split('\n')[:10]
+
+    temp_y = weather_y
+    for j, line in enumerate(weather_lines):
+        if line.strip():
+            font_to_use = header_font if j == 0 else small_font
+            draw.text((right_col_x, temp_y), line, font=font_to_use, fill=0)
+            temp_y += 25 if j == 0 else 18
+
+    return image
+
+def display_image_only(image_path):
+    """Display only an image on the e-ink screen"""
+    print("Initializing e-ink display for image-only mode...")
+    epd = epd7in5_V2.EPD()
+    epd.init()
+    
+    try:
+        if not os.path.exists(image_path):
+            print(f"Error: Image not found at {image_path}")
+            return
+            
+        print(f"Loading image: {image_path}")
+        img = Image.open(image_path)
+        
+        if img.size != (800, 480):
+            img = img.resize((800, 480), Image.Resampling.LANCZOS)
+        
+        if img.mode != '1':
+            img = img.convert('1')
+        
+        print("Displaying image on e-ink screen...")
+        epd.display(epd.getbuffer(img))
+        
+        print("Display complete! Putting screen to sleep.")
+        epd.sleep()
+        
+    except Exception as e:
+        print(f"Error displaying image: {e}")
+        epd.sleep()
 
 def main():
-    parser = argparse.ArgumentParser(description="AC Transit Bus Tracker")
-    parser.add_argument("--api_key", default=API_KEY)
-    parser.add_argument("--refresh", type=int, default=60)
-    parser.add_argument("--once", action="store_true")
-    args = parser.parse_args()
-
-    if args.once:
-        display_predictions(args.api_key)
+    """Main function"""
+    if len(sys.argv) > 1:
+        if sys.argv[1] == "--image-only" and len(sys.argv) > 2:
+            display_image_only(sys.argv[2])
+            return
+        elif os.path.exists(sys.argv[1]):
+            custom_image_path = sys.argv[1]
+        else:
+            print(f"Warning: Image path '{sys.argv[1]}' not found, using default")
+            custom_image_path = None
     else:
-        try:
-            while True:
-                display_predictions(args.api_key)
-                print(f"\nRefreshing in {args.refresh} seconds...")
-                time.sleep(args.refresh)
-        except KeyboardInterrupt:
-            print("\nExiting AC Transit Bus Tracker")
+        custom_image_path = None
+
+    print("Initializing e-ink display...")
+    epd = epd7in5_V2.EPD()
+    epd.init()
+    
+    try:
+        print("Gathering data and creating display image...")
+        image = create_display_image(custom_image_path)
+        
+        print("Displaying on e-ink screen (this takes 15-30 seconds)...")
+        epd.display(epd.getbuffer(image))
+        
+        print("Display complete! Putting screen to sleep.")
+        epd.sleep()
+        
+    except Exception as e:
+        print(f"Error: {e}")
+        epd.sleep()
 
 if __name__ == "__main__":
     main()
-
